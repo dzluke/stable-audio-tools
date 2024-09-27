@@ -110,7 +110,9 @@ def make_cond_model_fn(model, cond_fn):
 # For inpainting, set both init_data & mask 
 def sample_k(
         model_fn, 
-        noise, 
+        noise,
+        bending_fn=None,
+        layer=-1,
         init_data=None,
         mask=None,
         steps=100, 
@@ -190,7 +192,67 @@ def sample_k(
         elif sampler_type == "dpmpp-2m-sde":
             return K.sampling.sample_dpmpp_2m_sde(denoiser, x, sigmas, disable=False, callback=wrapped_callback, extra_args=extra_args)
         elif sampler_type == "dpmpp-3m-sde":
-            return K.sampling.sample_dpmpp_3m_sde(denoiser, x, sigmas, disable=False, callback=wrapped_callback, extra_args=extra_args)
+            return bending_sample_dpmpp_3m_sde(denoiser, x, sigmas, bending_fn, layer, disable=False, callback=wrapped_callback, extra_args=extra_args)  # network bend in here
+
+@torch.no_grad()
+def bending_sample_dpmpp_3m_sde(model, x, sigmas, bending_fn, layer, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., noise_sampler=None):
+    """DPM-Solver++(3M) SDE.
+    This function is originally from the file "sampling.py in the folder "k_diffusion" of Stable Audio
+    It's original name is sample_dpmpp_3m_sde
+    I edited it here to include network bending capabilities
+
+    """
+
+    sigma_min, sigma_max = sigmas[sigmas > 0].min(), sigmas.max()
+    noise_sampler = K.sampling.BrownianTreeNoiseSampler(x, sigma_min, sigma_max) if noise_sampler is None else noise_sampler
+    extra_args = {} if extra_args is None else extra_args
+    s_in = x.new_ones([x.shape[0]])
+
+    denoised_1, denoised_2 = None, None
+    h_1, h_2 = None, None
+
+    for i in trange(len(sigmas) - 1, disable=disable):
+
+        if bending_fn is not None and i == layer:
+            device = x.get_device()
+            x = bending_fn(x)
+            x = x.to(device)
+
+        denoised = model(x, sigmas[i] * s_in, **extra_args)
+        if callback is not None:
+            callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
+        if sigmas[i + 1] == 0:
+            # Denoising step
+            x = denoised
+        else:
+            t, s = -sigmas[i].log(), -sigmas[i + 1].log()
+            h = s - t
+            h_eta = h * (eta + 1)
+
+            x = torch.exp(-h_eta) * x + (-h_eta).expm1().neg() * denoised
+
+            if h_2 is not None:
+                r0 = h_1 / h
+                r1 = h_2 / h
+                d1_0 = (denoised - denoised_1) / r0
+                d1_1 = (denoised_1 - denoised_2) / r1
+                d1 = d1_0 + (d1_0 - d1_1) * r0 / (r0 + r1)
+                d2 = (d1_0 - d1_1) / (r0 + r1)
+                phi_2 = h_eta.neg().expm1() / h_eta + 1
+                phi_3 = phi_2 / h_eta - 0.5
+                x = x + phi_2 * d1 - phi_3 * d2
+            elif h_1 is not None:
+                r = h_1 / h
+                d = (denoised - denoised_1) / r
+                phi_2 = h_eta.neg().expm1() / h_eta + 1
+                x = x + phi_2 * d
+
+            if eta:
+                x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * sigmas[i + 1] * (-2 * h * eta).expm1().neg().sqrt() * s_noise
+
+        denoised_1, denoised_2 = denoised, denoised_1
+        h_1, h_2 = h, h_1
+    return x
 
 # Uses discrete Euler sampling for rectified flow models
 # init_data is init_audio as latents (if this is latent diffusion)

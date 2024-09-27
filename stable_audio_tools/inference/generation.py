@@ -89,6 +89,8 @@ def generate_diffusion_uncond(
 
 def generate_diffusion_cond(
         model,
+        bending_fn = None,
+        layer = -1,
         steps: int = 250,
         cfg_scale=6,
         conditioning: dict = None,
@@ -222,7 +224,7 @@ def generate_diffusion_cond(
 
     if diff_objective == "v":    
         # k-diffusion denoising process go!
-        sampled = sample_k(model.model, noise, init_audio, mask, steps, **sampler_kwargs, **conditioning_inputs, **negative_conditioning_tensors, cfg_scale=cfg_scale, batch_cfg=True, rescale_cfg=True, device=device)
+        sampled = sample_k(model.model, noise, bending_fn, layer, init_audio, mask, steps, **sampler_kwargs, **conditioning_inputs, **negative_conditioning_tensors, cfg_scale=cfg_scale, batch_cfg=True, rescale_cfg=True, device=device)
     elif diff_objective == "rectified_flow":
 
         if "sigma_min" in sampler_kwargs:
